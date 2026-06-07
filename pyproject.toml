@@ -9,6 +9,7 @@ python = ">=3.11"
 pandas = "^3.0.3"
 scipy = "^1.17.1"
 matplotlib = "^3.10.9"
+seaborn = "^0.13.2"
 
 [tool.poetry.dev-dependencies]
 
