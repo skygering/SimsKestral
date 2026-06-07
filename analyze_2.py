@@ -8,14 +8,18 @@ import fetch_data
 # ----------------------------
 # Signal helpers
 # ----------------------------
-def build_displacement(data, hub):
+def build_displacement(data, hub, return_raw=False):
     t = np.asarray(data["Time"], dtype=float)
     pitch_deg = np.asarray(data["PtfmPitch"], dtype=float)
     surge = np.asarray(data["PtfmSurge"], dtype=float)
 
-    x_loc = surge + hub * np.sin(np.deg2rad(pitch_deg))
-    x = ssig.detrend(x_loc, type="linear")
+    x_raw = surge + hub * np.sin(np.deg2rad(pitch_deg))  # hub displacement (raw)
+    x = ssig.detrend(x_raw, type="linear")               # dynamic displacement (detrended)
+
+    if return_raw:
+        return t, x, x_raw
     return t, x
+
 
 def calc_velocity(t, x, method="savgol", window=201, poly=3):
     dt = float(np.mean(np.diff(t)))
@@ -50,6 +54,7 @@ def fft_psd_density(t, x):
         psd[1:] *= 2.0
     return f, psd
 
+
 def welch_psd_density(t, x, nperseg=4096, noverlap=None):
     dt = float(np.mean(np.diff(t)))
     fs = 1.0 / dt
@@ -74,6 +79,7 @@ def welch_psd_density(t, x, nperseg=4096, noverlap=None):
     )
     return f, psd
 
+
 def band_metrics(f, Pxx, frange):
     m = (f >= frange[0]) & (f <= frange[1])
     if np.sum(m) < 2:
@@ -85,12 +91,14 @@ def band_metrics(f, Pxx, frange):
     Aeq_band = np.sqrt(2.0) * np.sqrt(max(var_band, 0.0))
     return fpk, Aeq_band
 
+
 def worst_case_amplitude(t, x, t_start=800, t_end=1000):
     m = (t >= t_start) & (t <= t_end)
     if np.sum(m) < 2:
         return np.nan
     xw = x[m]
     return 0.5 * (np.max(xw) - np.min(xw))
+
 
 def nanmean_std(a):
     a = np.asarray(a, dtype=float)
@@ -101,11 +109,30 @@ def nanmean_std(a):
         return float(a[0]), np.nan
     return float(np.mean(a)), float(np.std(a, ddof=1))
 
+
+def pooled_nanmean_std(series_list):
+    """
+    series_list: list of 1D arrays (one per seed)
+    returns pooled mean/std over all finite points from all seeds+time
+    """
+    if len(series_list) == 0:
+        return np.nan, np.nan, 0
+
+    y = np.concatenate([
+        np.asarray(s, dtype=float).ravel()
+        for s in series_list
+        if s is not None and len(s) > 0
+    ])
+    y = y[np.isfinite(y)]
+
+    if y.size == 0:
+        return np.nan, np.nan, 0
+    if y.size == 1:
+        return float(y[0]), np.nan, 1
+    return float(np.mean(y)), float(np.std(y, ddof=1)), int(y.size)
+
+
 def stack_psd_mean(spec_list):
-    """
-    Fast mean stack, assumes same frequency grid for all seeds.
-    Falls back to interpolation if needed.
-    """
     if len(spec_list) == 0:
         return None, None
 
@@ -120,35 +147,35 @@ def stack_psd_mean(spec_list):
     return f_ref, np.mean(P, axis=0)
 
 # ----------------------------
-# CT and CT' helper
+# CT helpers
 # ----------------------------
-def pooled_nanmean_std(series_list):
-    """
-    series_list: list of 1D arrays (one per seed)
-    returns pooled mean/std over all finite points from all seeds+time
-    """
-    if len(series_list) == 0:
-        return np.nan, np.nan, 0
+def compute_ct(Fxh, rho, A, Uref):
+    den = 0.5 * rho * A * (Uref ** 2)
+    if den <= 0:
+        return np.full_like(Fxh, np.nan, dtype=float)
+    return Fxh / den
 
-    y = np.concatenate([np.asarray(s, dtype=float).ravel() for s in series_list if s is not None and len(s) > 0])
-    y = y[np.isfinite(y)]
 
-    if y.size == 0:
-        return np.nan, np.nan, 0
-    if y.size == 1:
-        return float(y[0]), np.nan, 1
-    return float(np.mean(y)), float(np.std(y, ddof=1)), int(y.size)
+def compute_ct_prime(Fxh, RtVAvgxh, v_hub_raw, rho, A, urel_floor=0.01, yaw = 0.0, tilt = 0.0):
+    # CT' = Fx / [0.5 rho A (RtVAvgxh - v_hub_raw)^2]
+    Urel = (RtVAvgxh) * np.cos(yaw) * np.cos(tilt)
+    den = 0.5 * rho * A * (Urel ** 2)
+
+    ctp = np.full_like(Fxh, np.nan, dtype=float)
+    m = np.abs(Urel) > urel_floor
+    ctp[m] = Fxh[m] / den[m]
+    return ctp
 
 # ----------------------------
-# Plot helper
+# Plot helpers
 # ----------------------------
 def plot_condition_2x2(
     t_list, x_list, v_list, Tp,
-    x_wel_specs, v_wel_specs,              # <-- per-seed Welch spectra
+    x_wel_specs, v_wel_specs,
     f_x_wel, P_x_wel_mean,
     f_v_wel, P_v_wel_mean,
     title, out_png,
-    x_fft_specs=None, v_fft_specs=None,    # <-- per-seed FFT spectra (optional)
+    x_fft_specs=None, v_fft_specs=None,
     f_x_fft=None, P_x_fft_mean=None,
     f_v_fft=None, P_v_fft_mean=None,
     plot_seed_psd=True
@@ -159,9 +186,9 @@ def plot_condition_2x2(
 
     # top row traces
     for i, (t, x) in enumerate(zip(t_list, x_list)):
-        ax_t_x.plot(t, x, lw=1.5, label=f"Seed {i+1}")
+        ax_t_x.plot(t, x, lw=1.2, label=f"Seed {i+1}")
     for i, (t, v) in enumerate(zip(t_list, v_list)):
-        ax_t_v.plot(t, v, lw=1.5, label=f"Seed {i+1}")
+        ax_t_v.plot(t, v, lw=1.2, label=f"Seed {i+1}")
 
     ax_t_x.set_title("Displacement (seed traces)")
     ax_t_x.set_xlabel("Time [s]")
@@ -173,30 +200,28 @@ def plot_condition_2x2(
     ax_t_v.set_ylabel("v [m/s]")
     ax_t_v.grid(alpha=0.3)
 
-    # -------- bottom row PSDs: per-seed + mean --------
+    # bottom row PSDs
     if plot_seed_psd:
-        # Welch seeds
-        for i, (f, p) in enumerate(x_wel_specs):
-            ax_p_x.loglog(f[1:], p[1:], color="C1", lw=1.0, alpha=0.5,
-                          label="Welch seeds" if i == 0 else None)
-        for i, (f, p) in enumerate(v_wel_specs):
-            ax_p_v.loglog(f[1:], p[1:], color="C1", lw=1.0, alpha=0.5,
-                          label="Welch seeds" if i == 0 else None)
+        nseed = len(x_wel_specs)
+        cmap = plt.get_cmap("tab20", max(nseed, 1))
+        for i, ((fx, px), (fv, pv)) in enumerate(zip(x_wel_specs, v_wel_specs)):
+            c = cmap(i)
+            ax_p_x.loglog(fx[1:], px[1:], color=c, lw=0.9, alpha=0.65)
+            ax_p_v.loglog(fv[1:], pv[1:], color=c, lw=0.9, alpha=0.65)
 
-        # FFT seeds (optional)
         if x_fft_specs is not None:
             for i, (f, p) in enumerate(x_fft_specs):
-                ax_p_x.loglog(f[1:], p[1:], color="C0", lw=0.8, alpha=0.20,
+                ax_p_x.loglog(f[1:], p[1:], color="0.6", lw=0.7, alpha=0.2,
                               label="FFT seeds" if i == 0 else None)
         if v_fft_specs is not None:
             for i, (f, p) in enumerate(v_fft_specs):
-                ax_p_v.loglog(f[1:], p[1:], color="C0", lw=0.8, alpha=0.20,
+                ax_p_v.loglog(f[1:], p[1:], color="0.6", lw=0.7, alpha=0.2,
                               label="FFT seeds" if i == 0 else None)
 
-    # Mean lines on top
+    # means
     if f_x_fft is not None and P_x_fft_mean is not None:
-        ax_p_x.loglog(f_x_fft[1:], P_x_fft_mean[1:], "C0-", lw=2.5, label="FFT mean")
-    ax_p_x.loglog(f_x_wel[1:], P_x_wel_mean[1:], "C1--", lw=2.5, label="Welch mean")
+        ax_p_x.loglog(f_x_fft[1:], P_x_fft_mean[1:], "C0-", lw=2.2, label="FFT mean")
+    ax_p_x.loglog(f_x_wel[1:], P_x_wel_mean[1:], "k-", lw=2.4, label="Welch mean")
     ax_p_x.axvline(1.0 / Tp, linestyle="dashed", color="k")
     ax_p_x.set_title("Displacement PSD")
     ax_p_x.set_xlabel("Frequency [Hz]")
@@ -206,13 +231,46 @@ def plot_condition_2x2(
 
     if f_v_fft is not None and P_v_fft_mean is not None:
         ax_p_v.loglog(f_v_fft[1:], P_v_fft_mean[1:], "C0-", lw=2.2, label="FFT mean")
-    ax_p_v.loglog(f_v_wel[1:], P_v_wel_mean[1:], "C1--", lw=2.2, label="Welch mean")
+    ax_p_v.loglog(f_v_wel[1:], P_v_wel_mean[1:], "k-", lw=2.4, label="Welch mean")
     ax_p_v.axvline(1.0 / Tp, linestyle="dashed", color="k")
     ax_p_v.set_title("Velocity PSD")
     ax_p_v.set_xlabel("Frequency [Hz]")
     ax_p_v.set_ylabel("PSD [(m/s)²/Hz]")
     ax_p_v.grid(alpha=0.3)
     ax_p_v.legend()
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_ct_timeseries(
+    t_list, ct_list, ctp_list, ct_ref_list, title, out_png
+):
+    fig, axs = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    ax_ct, ax_ctp, ax_ctref = axs
+    cmap = plt.get_cmap("tab20", max(len(t_list), 1))
+
+    for i, (t, ct, ctp, ctref) in enumerate(zip(t_list, ct_list, ctp_list, ct_ref_list)):
+        c = cmap(i)
+        ax_ct.plot(t, ct, color=c, lw=1.1, alpha=0.85, label=f"Seed {i+1}")
+        ax_ctp.plot(t, ctp, color=c, lw=1.1, alpha=0.85)
+        ax_ctref.plot(t, ctref, color=c, lw=1.1, alpha=0.85)
+
+    ax_ct.set_title("CT(t)")
+    ax_ct.set_ylabel("CT [-]")
+    ax_ct.grid(alpha=0.3)
+    ax_ct.legend(ncol=2, fontsize=9)
+
+    ax_ctp.set_title("CT'(t)")
+    ax_ctp.set_ylabel("CT' [-]")
+    ax_ctp.grid(alpha=0.3)
+
+    ax_ctref.set_title("RtFldCt(t)")
+    ax_ctref.set_ylabel("RtFldCt [-]")
+    ax_ctref.set_xlabel("Time [s]")
+    ax_ctref.grid(alpha=0.3)
 
     fig.suptitle(title)
     fig.tight_layout()
@@ -228,29 +286,46 @@ def run_analysis(
     LF_frange=(1/300, 1/30),
     WF_frange=(1/30, 1/1),
     vel_method="savgol",
-    do_fft_analysis=False,     # <<< key flag
-    make_plots=True,           # <<< speed flag
-    welch_nperseg=8193,        # <<< lower than 8192 for speed
+    ct_vel_method="savgol",       # raw hub velocity for CT'
+    do_fft_analysis=False,          # controls LF FFT analysis only
+    make_plots=True,
+    plot_set="both",                # "none", "psd", "ct", "both"
+    welch_nperseg=8192,
     welch_noverlap=None,
     t_analyze_start=600,
     t_trace_start=950,
+    rho=1.225,
+    D=240.0,
+    urel_floor=0.01,
     out_csv="condition_summary_stats_all_cases.csv",
+    ct_out_csv="ct_condition_summary_stats_all_cases.csv",
     fig_dir="fig_ensemble",
-    # wind_speeds=(10.5, 5.0, 25.0),
+    ct_fig_dir="fig_ct_timeseries",
     min_hs=1.0,
     min_tp=4.0,
 ):
-    os.makedirs(fig_dir, exist_ok=True)
-    summary_rows = []
+    plot_set = str(plot_set).lower()
+    if plot_set not in {"none", "psd", "ct", "both"}:
+        raise ValueError("plot_set must be one of: 'none', 'psd', 'ct', 'both'")
 
-    # Fast local references
+    make_psd_plots = make_plots and plot_set in {"psd", "both"}
+    make_ct_plots = make_plots and plot_set in {"ct", "both"}
+
+    if make_psd_plots:
+        os.makedirs(fig_dir, exist_ok=True)
+    if make_ct_plots:
+        os.makedirs(ct_fig_dir, exist_ok=True)
+
+    summary_rows = []
+    ct_rows = []
+
     HUB = fetch_data.HUB
     load_outfile = fetch_data.load_outfile
     data_path = fetch_data.DATA_PATH
+    A = np.pi * (D ** 2) / 4.0
 
-    # upfront filtering
-    # cases = cases[cases["HWindSpeed"].isin(wind_speeds)]
     cases = cases[(cases["WaveHs"] > min_hs) & (cases["WaveTp"] > min_tp)]
+    # cases = cases[cases["HWindSpeed"] == 10.5]
 
     for (U, Hs, Tp), g in cases.groupby(["HWindSpeed", "WaveHs", "WaveTp"], sort=True):
         if g.empty:
@@ -258,10 +333,8 @@ def run_analysis(
 
         print(f"Selected case group: U={U}, Hs={Hs}, Tp={Tp}")
 
-        # per-seed metric storage (lists; no inner DataFrame)
+        # per-seed scalar metrics
         metrics = {
-            "x_wel_f_lf": [], "x_wel_A_lf": [],
-            "v_wel_f_lf": [], "v_wel_A_lf": [],
             "x_wel_f_wf": [], "x_wel_A_wf": [],
             "v_wel_f_wf": [], "v_wel_A_wf": [],
             "Av_from_Ax_wf_wel": [],
@@ -274,55 +347,59 @@ def run_analysis(
                 "v_fft_f_lf": [], "v_fft_A_lf": [],
             })
 
-        # only allocate plotting storage if needed
-        if make_plots:
+        # pooled CT arrays (across seeds/time)
+        ct_all = []
+        ctp_all = []
+        ctref_all = []
+
+        # plotting storage
+        if make_psd_plots:
             t_list, x_list, v_list = [], [], []
             x_wel_specs, v_wel_specs = [], []
             if do_fft_analysis:
                 x_fft_specs, v_fft_specs = [], []
+
+        if make_ct_plots:
+            t_ct_list, ct_list_plot, ctp_list_plot, ctref_list_plot = [], [], [], []
 
         for row in g.itertuples(index=False):
             case_name = row.case_name
             file = os.path.join(data_path, "outfiles", f"{case_name}.out")
             data = load_outfile(file)
 
-            t, x = build_displacement(data, HUB)
+            # displacement (dynamic + raw)
+            t_all, x_dyn_all, x_raw_all = build_displacement(data, HUB, return_raw=True)
 
-            # crop analysis window early to reduce work
-            m = t > t_analyze_start
-            t = t[m]
-            x = x[m]
+            m = t_all > t_analyze_start
+            t = t_all[m]
+            x = x_dyn_all[m]
+            x_raw = x_raw_all[m]
 
             if len(t) < 10:
                 continue
 
-            v = calc_velocity(t, x, method=vel_method)
+            # velocities
+            v = calc_velocity(t, x, method=vel_method)                # dynamic velocity for PSD
+            vhub_raw = calc_velocity(t, x_raw, method=ct_vel_method)     # raw hub velocity for CT'
 
-            # Welch (always)
+            # Welch (WF only for reported metrics)
             fx_wel, Px_wel = welch_psd_density(t, x, nperseg=welch_nperseg, noverlap=welch_noverlap)
             fv_wel, Pv_wel = welch_psd_density(t, v, nperseg=welch_nperseg, noverlap=welch_noverlap)
 
-            # Welch LF + WF metrics
-            x_wel_f_lf, x_wel_A_lf = band_metrics(fx_wel, Px_wel, LF_frange)
-            v_wel_f_lf, v_wel_A_lf = band_metrics(fv_wel, Pv_wel, LF_frange)
             x_wel_f_wf, x_wel_A_wf = band_metrics(fx_wel, Px_wel, WF_frange)
             v_wel_f_wf, v_wel_A_wf = band_metrics(fv_wel, Pv_wel, WF_frange)
 
-            metrics["x_wel_f_lf"].append(x_wel_f_lf)
-            metrics["x_wel_A_lf"].append(x_wel_A_lf)
-            metrics["v_wel_f_lf"].append(v_wel_f_lf)
-            metrics["v_wel_A_lf"].append(v_wel_A_lf)
             metrics["x_wel_f_wf"].append(x_wel_f_wf)
             metrics["x_wel_A_wf"].append(x_wel_A_wf)
             metrics["v_wel_f_wf"].append(v_wel_f_wf)
             metrics["v_wel_A_wf"].append(v_wel_A_wf)
             metrics["Av_from_Ax_wf_wel"].append(x_wel_A_wf * 2 * np.pi * x_wel_f_wf)
 
-            # worst case
+            # worst-case amplitudes
             metrics["x_wc_amp"].append(worst_case_amplitude(t, x, 800, 1000))
             metrics["v_wc_amp"].append(worst_case_amplitude(t, v, 800, 1000))
 
-            # optional FFT LF
+            # optional FFT LF metrics only
             if do_fft_analysis:
                 fx_fft, Px_fft = fft_psd_density(t, x)
                 fv_fft, Pv_fft = fft_psd_density(t, v)
@@ -335,8 +412,32 @@ def run_analysis(
                 metrics["v_fft_f_lf"].append(v_fft_f_lf)
                 metrics["v_fft_A_lf"].append(v_fft_A_lf)
 
-            # optional plotting storage
-            if make_plots:
+            # ---- CT/CT' time series ----
+            for fld in ("RtFldCt", "RtFldFxh", "RtVAvgxh"):
+                if fld not in data:
+                    raise KeyError(f"Required field '{fld}' not found in outfile data.")
+
+            Uref=float(U)
+            Fxh = np.asarray(data["RtFldFxh"], dtype=float)[m]
+            RtVAvgxh = np.asarray(data["RtVAvgxh"], dtype=float)[m]
+            Ct_ref = np.asarray(data["RtFldCt"], dtype=float)[m]
+
+            yaw = np.deg2rad(data["PtfmYaw"], dtype=float)[m]
+            tilt = np.deg2rad(data["PtfmPitch"], dtype=float)[m]
+
+            Ct = compute_ct(Fxh, rho=rho, A=A, Uref=Uref)
+            Ct_p = compute_ct_prime(
+                Fxh, RtVAvgxh, vhub_raw,
+                rho=rho, A=A, urel_floor=urel_floor,
+                yaw=yaw, tilt=tilt,
+            )
+
+            ct_all.append(Ct)
+            ctp_all.append(Ct_p)
+            ctref_all.append(Ct_ref)
+
+            # plotting storage
+            if make_psd_plots:
                 mp = t >= t_trace_start
                 t_list.append(t[mp])
                 x_list.append(x[mp])
@@ -344,14 +445,22 @@ def run_analysis(
 
                 x_wel_specs.append((fx_wel, Px_wel))
                 v_wel_specs.append((fv_wel, Pv_wel))
+
                 if do_fft_analysis:
                     x_fft_specs.append((fx_fft, Px_fft))
                     v_fft_specs.append((fv_fft, Pv_fft))
+
+            if make_ct_plots:
+                t_ct_list.append(t)
+                ct_list_plot.append(Ct)
+                ctp_list_plot.append(Ct_p)
+                ctref_list_plot.append(Ct_ref)
 
         n_used = len(metrics["x_wel_f_wf"])
         if n_used == 0:
             continue
 
+        # ---- spectral/amp summary ----
         row_out = {
             "HWindSpeed": U,
             "WaveHs": Hs,
@@ -359,12 +468,13 @@ def run_analysis(
             "n_seeds": n_used,
         }
 
-        # aggregate Welch stats
+        # Keep Welch LF columns for compatibility, but not used
+        for c in ["x_wel_ens_f_lf", "x_wel_ens_A_lf", "v_wel_ens_f_lf", "v_wel_ens_A_lf"]:
+            row_out[c] = np.nan
+            row_out[c + "_std"] = np.nan
+
+        # WF Welch aggregates
         welch_map = {
-            "x_wel_ens_f_lf": "x_wel_f_lf",
-            "x_wel_ens_A_lf": "x_wel_A_lf",
-            "v_wel_ens_f_lf": "v_wel_f_lf",
-            "v_wel_ens_A_lf": "v_wel_A_lf",
             "x_wel_ens_f_wf": "x_wel_f_wf",
             "x_wel_ens_A_wf": "x_wel_A_wf",
             "v_wel_ens_f_wf": "v_wel_f_wf",
@@ -376,15 +486,11 @@ def run_analysis(
             row_out[out_col] = mu
             row_out[out_col + "_std"] = sd
 
-        # aggregate worst-case
         row_out["x_wc_amp_mean"], row_out["x_wc_amp_std"] = nanmean_std(metrics["x_wc_amp"])
         row_out["v_wc_amp_mean"], row_out["v_wc_amp_std"] = nanmean_std(metrics["v_wc_amp"])
 
-        # aggregate FFT LF stats or fill NaN
-        fft_cols = [
-            "x_fft_ens_f_lf", "x_fft_ens_A_lf",
-            "v_fft_ens_f_lf", "v_fft_ens_A_lf",
-        ]
+        # LF FFT aggregates (optional)
+        fft_cols = ["x_fft_ens_f_lf", "x_fft_ens_A_lf", "v_fft_ens_f_lf", "v_fft_ens_A_lf"]
         if do_fft_analysis:
             fft_map = {
                 "x_fft_ens_f_lf": "x_fft_f_lf",
@@ -403,8 +509,29 @@ def run_analysis(
 
         summary_rows.append(row_out)
 
-        # optional plots
-        if make_plots:
+        # ---- CT pooled stats across seeds+time ----
+        ct_mean, ct_std, ct_n = pooled_nanmean_std(ct_all)
+        ctp_mean, ctp_std, ctp_n = pooled_nanmean_std(ctp_all)
+        ctref_mean, ctref_std, ctref_n = pooled_nanmean_std(ctref_all)
+
+        ct_rows.append({
+            "HWindSpeed": U,
+            "WaveHs": Hs,
+            "WaveTp": Tp,
+            "n_seeds": n_used,
+            "CT_pooled_mean": ct_mean,
+            "CT_pooled_std": ct_std,
+            "CT_pooled_n": ct_n,
+            "CTp_pooled_mean": ctp_mean,
+            "CTp_pooled_std": ctp_std,
+            "CTp_pooled_n": ctp_n,
+            "RtFldCt_pooled_mean": ctref_mean,
+            "RtFldCt_pooled_std": ctref_std,
+            "RtFldCt_pooled_n": ctref_n,
+        })
+
+        # ---- PSD plots ----
+        if make_psd_plots:
             fx_wel_e, Px_wel_mean = stack_psd_mean(x_wel_specs)
             fv_wel_e, Pv_wel_mean = stack_psd_mean(v_wel_specs)
 
@@ -429,28 +556,49 @@ def run_analysis(
                 plot_seed_psd=True,
             )
 
+        # ---- CT plots ----
+        if make_ct_plots:
+            ct_title = f"CT time series | U={U}, Hs={Hs}, Tp={Tp}, n={n_used}"
+            ct_png = os.path.join(ct_fig_dir, f"CT_U{U}_Hs{Hs}_Tp{Tp}.png")
+            plot_ct_timeseries(
+                t_ct_list, ct_list_plot, ctp_list_plot, ctref_list_plot,
+                ct_title, ct_png
+            )
+
     summary_df = pd.DataFrame(summary_rows)
+    ct_summary_df = pd.DataFrame(ct_rows)
+
     summary_df.to_csv(out_csv, index=False)
-    return summary_df
+    ct_summary_df.to_csv(ct_out_csv, index=False)
+
+    return summary_df, ct_summary_df
 
 
 if __name__ == "__main__":
     cases = fetch_data.get_cases()
 
-    summary_df = run_analysis(
+    summary_df, ct_summary_df = run_analysis(
         cases=cases,
         fetch_data=fetch_data,
         LF_frange=(1/300, 1/30),
         WF_frange=(1/30, 1/1),
-        vel_method="savgol",        # "gradient" is faster if you want
-        do_fft_analysis=False,      # <<< Welch-only focus
-        make_plots=True,            # set False for max speed
-        welch_nperseg=4096*2,
+        vel_method="savgol",
+        ct_vel_method="savgol",
+        do_fft_analysis=False,          # LF FFT analysis on/off
+        make_plots=False,
+        plot_set="ct",                # "none", "psd", "ct", "both"
+        welch_nperseg=4096 * 2,
         welch_noverlap=None,
         t_analyze_start=600,
         t_trace_start=950,
+        rho=1.225,
+        D=240.0,
+        urel_floor=0.01,
         out_csv="condition_summary_stats_all_cases.csv",
+        ct_out_csv="ct_condition_summary_stats_all_cases.csv",
         fig_dir="fig_ensemble",
+        ct_fig_dir="fig_ct_timeseries",
     )
 
     print(summary_df.head())
+    print(ct_summary_df.head())

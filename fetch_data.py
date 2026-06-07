@@ -14,6 +14,7 @@ NEEDED_COLS = [
     "RtFldCt",
     "RtFldFxh",
     "RtVAvgxh",
+    "RtVAvgyh",
 ]
 
 RHO = 1.225

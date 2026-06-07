@@ -10,6 +10,7 @@ import matplotlib.ticker as mticker
 # Config
 # ============================================================
 CSV_PATH = "condition_summary_stats_all_cases.csv"
+CT_CSV_PATH = "ct_condition_summary_stats_all_cases.csv"
 
 TP_VALUES = [6, 8, 10, 12]
 HS_VALUES = [2, 3, 5]
@@ -145,6 +146,7 @@ def draw_errorbars(ax, data, x_col, y_col, yerr_col, color_fn, lw=1.2, capsize=2
 # ============================================================
 # Plot layout A: 3x4 grid (rows=Hs, cols=Tp), x=HWindSpeed
 # ============================================================
+
 def plot_grid_hs_tp(
     data,
     tp_values,
@@ -159,9 +161,13 @@ def plot_grid_hs_tp(
     x_col="HWindSpeed",
     x_offset=0.15,
     atol=1e-6,
-    add_tp_reference_line=False,   # meaningful only for dimensional frequency
+    add_tp_reference_line=False,
+    group_order=None,          # NEW
+    palette=None,              # NEW
 ):
-    group_order = list(data[group_col].dropna().unique())
+    if group_order is None:
+        group_order = list(data[group_col].dropna().unique())
+
     plot_df, _ = add_centered_offsets(
         data,
         x_col=x_col,
@@ -171,7 +177,8 @@ def plot_grid_hs_tp(
         out_col="x_plot"
     )
 
-    palette = dict(zip(group_order, sns.color_palette("Set2", n_colors=len(group_order))))
+    if palette is None:
+        palette = dict(zip(group_order, sns.color_palette("Set2", n_colors=len(group_order))))
 
     g = sns.FacetGrid(
         plot_df,
@@ -215,15 +222,15 @@ def plot_grid_hs_tp(
                 legend=False,
                 ax=ax
             )
-
-            draw_errorbars(
-                ax=ax,
-                data=sub,
-                x_col="x_plot",
-                y_col=y_col,
-                yerr_col=ystd_col,
-                color_fn=lambda r: palette[r[group_col]],
-            )
+            if ystd_col is not None:
+                draw_errorbars(
+                    ax=ax,
+                    data=sub,
+                    x_col="x_plot",
+                    y_col=y_col,
+                    yerr_col=ystd_col,
+                    color_fn=lambda r: palette[r[group_col]],
+                )
 
             # Optional horizontal reference: 1/Tp
             if add_tp_reference_line:
@@ -271,6 +278,131 @@ def plot_grid_hs_tp(
     )
     fig.suptitle(title, y=1.02, fontsize=20)
     fig.tight_layout(rect=[0, 0, 0.9, 1])
+    fig.savefig(outfile, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {outfile}")
+
+def plot_ct_grid_3x2_hs_source(
+    data,
+    hs_values,
+    value_col="CTValue",
+    std_col="CTStd",
+    source_col="Source",
+    outfile="ct_metrics_grid_3x2.png",
+    title="$C_T$ and $C_T'$ vs Wind Speed",
+    atol=1e-6,
+    rtfld_ref_by_hs=None,  # dict: {Hs: mean RtFldCt}
+):
+    # Keep only CT and CT'
+    source_order = ["$C_T$", "$C_T'$"]
+    plot_df = data[data[source_col].isin(source_order)].copy()
+
+    # small x-offset by Tp to reduce overlap at same U
+    tp_order = sorted(plot_df["WaveTp"].dropna().unique())
+    if len(tp_order) > 1:
+        tp_offsets = np.linspace(-0.12, 0.12, len(tp_order))
+        tp_offset_map = dict(zip(tp_order, tp_offsets))
+    else:
+        tp_offset_map = {tp_order[0]: 0.0} if len(tp_order) == 1 else {}
+
+    plot_df["x_plot"] = plot_df["HWindSpeed"] + plot_df["WaveTp"].map(tp_offset_map).fillna(0.0)
+
+    # Style/color for CT vs CT'
+    palette = {"$C_T$": "C0", "$C_T'$": "C1"}
+    markers = {"$C_T$": "o", "$C_T'$": "s"}
+
+    g = sns.FacetGrid(
+        plot_df,
+        row="WaveHs",
+        col=source_col,
+        row_order=hs_values,
+        col_order=source_order,
+        sharex=True,
+        sharey=True,
+        margin_titles=True,
+        height=3.2,
+        aspect=1.25,
+        despine=False,
+    )
+
+    for hs in hs_values:
+        for src in source_order:
+            ax = g.axes_dict[(hs, src)]
+            sub = plot_df[
+                np.isclose(plot_df["WaveHs"], hs, atol=atol) &
+                (plot_df[source_col] == src)
+            ].copy()
+
+            if sub.empty:
+                ax.set_visible(False)
+                continue
+
+            sns.scatterplot(
+                data=sub,
+                x="x_plot",
+                y=value_col,
+                hue=source_col,
+                style=source_col,
+                hue_order=source_order,
+                style_order=source_order,
+                palette=palette,
+                markers=markers,
+                s=120,
+                alpha=0.9,
+                linewidth=0.8,
+                legend=False,
+                ax=ax
+            )
+
+            # Error bars
+            if std_col is not None:
+                m = np.isfinite(sub[std_col].to_numpy()) & (sub[std_col].to_numpy() > 0)
+                for _, r in sub.loc[m].iterrows():
+                    ax.errorbar(
+                        r["x_plot"], r[value_col],
+                        yerr=r[std_col],
+                        fmt="none",
+                        ecolor=palette[src],
+                        elinewidth=1.3,
+                        capsize=2.5,
+                        alpha=0.9
+                    )
+
+            # RtFldCt reference line for this Hs (mean over U,Tp)
+            if rtfld_ref_by_hs is not None:
+                yref = rtfld_ref_by_hs.get(hs, np.nan)
+                if np.isfinite(yref):
+                    ax.axhline(yref, ls="--", lw=1.2, color="0.35", alpha=0.6)
+
+            ax.grid(alpha=0.25)
+            ax.tick_params(axis="x", rotation=45)
+
+    for ax in g.axes.flat:
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
+        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
+
+    g.set_titles(row_template="$H_S = {row_name}$ [m]", col_template="{col_name}")
+
+    fig = g.figure
+    fig.supxlabel("HWindSpeed [m/s]")
+    fig.supylabel("Coefficient [-]")
+
+    # Legend
+    handles = [
+        Line2D([0], [0], marker=markers[s], linestyle="", markerfacecolor=palette[s],
+               markeredgecolor="black", markersize=10, label=s)
+        for s in source_order
+    ]
+    handles.append(
+        Line2D([0], [0], linestyle="--", color="0.35", lw=1.2, label="RtFldCt mean (by $H_S$)")
+    )
+
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.98), ncol=3, frameon=False)
+
+    fig.suptitle(title, y=1.03, fontsize=18)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(outfile, dpi=220, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved: {outfile}")
@@ -377,4 +509,61 @@ if __name__ == "__main__":
         add_tp_reference_line=False,
     )
 
-    
+    ct_raw = pd.read_csv(CT_CSV_PATH)
+    ct_df_filt = filter_by_tp_hs(ct_raw, TP_VALUES, HS_VALUES, atol=ATOL)
+
+    ct_mapping = {
+        "$C_T$": ("CT_pooled_mean", "CT_pooled_std"),
+        "$C_T'$": ("CTp_pooled_mean", "CTp_pooled_std"),
+        "RtFldCt": ("RtFldCt_pooled_mean", "RtFldCt_pooled_std"),
+    }
+
+    ct_long = build_long_metric_df(
+        df=ct_df_filt,
+        mapping=ct_mapping,
+        value_col_name="CTValue",
+        std_col_name="CTStd",
+        group_col_name="Source",
+    )
+
+    ct_markers = {"$C_T$": "o", "$C_T'$": "s", "RtFldCt": "^"}
+    ct_order = ["$C_T$", "$C_T'$", "RtFldCt"]
+    ct_palette = {"$C_T$": "C0", "$C_T'$": "C1", "RtFldCt": "C2"}
+
+    plot_grid_hs_tp(
+        data=ct_long,
+        tp_values=TP_VALUES,
+        hs_values=HS_VALUES,
+        group_col="Source",
+        y_col="CTValue",
+        ystd_col="CTStd",
+        ylabel="Coefficient [-]",
+        outfile="ct_grid_hs_tp_3x4.png",
+        title="$C_T$ Metrics vs Wind Speed",
+        markers=ct_markers,
+        x_col="HWindSpeed",
+        x_offset=0.20,   # 3 points per x, so a bit wider
+        atol=ATOL,
+        add_tp_reference_line=False,
+        group_order=ct_order,
+        palette=ct_palette,
+    )
+
+    plot_grid_hs_tp(
+        data=ct_long,
+        tp_values=TP_VALUES,
+        hs_values=HS_VALUES,
+        group_col="Source",
+        y_col="CTStd",
+        ystd_col=None,
+        ylabel="Coefficient STD [-]",
+        outfile="ct_std_grid_hs_tp_3x4.png",
+        title="$C_T$ STD Metrics vs Wind Speed",
+        markers=ct_markers,
+        x_col="HWindSpeed",
+        x_offset=0.20,   # 3 points per x, so a bit wider
+        atol=ATOL,
+        add_tp_reference_line=False,
+        group_order=ct_order,
+        palette=ct_palette,
+    )
