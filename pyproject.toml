@@ -5,11 +5,12 @@ description = ""
 authors = ["Skylar Gering"]
 
 [tool.poetry.dependencies]
-python = ">=3.11"
+python = ">=3.11,<4.0"
 pandas = "^3.0.3"
 scipy = "^1.17.1"
 matplotlib = "^3.10.9"
 seaborn = "^0.13.2"
+unified-momentum-model = {git = "ssh://git@github.com/Howland-Lab/Unified-Momentum-Model.git"}
 
 [tool.poetry.dev-dependencies]
 
