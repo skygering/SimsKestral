@@ -3,6 +3,7 @@ name = "SimsKestral"
 version = "0.1.0"
 description = ""
 authors = ["Skylar Gering"]
+package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.11,<4.0"
@@ -11,9 +12,13 @@ scipy = "^1.17.1"
 matplotlib = "^3.10.9"
 seaborn = "^0.13.2"
 unified-momentum-model = {git = "ssh://git@github.com/Howland-Lab/Unified-Momentum-Model.git"}
+tqdm = "^4.70.0"
+joblib = "^1.5.3"
 
 [tool.poetry.dev-dependencies]
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+

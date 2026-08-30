@@ -5,18 +5,20 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.lines import Line2D
 import matplotlib.ticker as mticker
+import os
 
 # ============================================================
 # Config
 # ============================================================
-CSV_PATH = "condition_summary_stats_all_cases.csv"
-CT_CSV_PATH = "ct_condition_summary_stats_all_cases.csv"
+outdir = "psd_values_fast"
+CSV_PATH = os.path.join(outdir, 'condition_summary_stats_all_cases.csv')
+CT_CSV_PATH = os.path.join(outdir, 'ct_condition_summary_stats_all_cases.csv')
 
 TP_VALUES = [6, 8, 10, 12]
 HS_VALUES = [2, 3, 5]
 
 D = 240.0
-NON_DIM = True          # <-- Toggle here
+NON_DIM = True   
 ATOL = 1e-6
 
 sns.set_theme(style="whitegrid", context="talk")
@@ -32,8 +34,9 @@ def filter_by_tp_hs(df, tp_values, hs_values, atol=1e-6):
 
     tp_mask = np.isclose(df["WaveTp"].to_numpy()[:, None], tp_arr[None, :], atol=atol).any(axis=1)
     hs_mask = np.isclose(df["WaveHs"].to_numpy()[:, None], hs_arr[None, :], atol=atol).any(axis=1)
+    ws_mask = df["HWindSpeed"] > 3
 
-    return df.loc[tp_mask & hs_mask].copy()
+    return df.loc[tp_mask & hs_mask & ws_mask].copy()
 
 
 def build_long_metric_df(df, mapping, value_col_name, std_col_name, group_col_name):
@@ -162,8 +165,9 @@ def plot_grid_hs_tp(
     x_offset=0.15,
     atol=1e-6,
     add_tp_reference_line=False,
-    group_order=None,          # NEW
-    palette=None,              # NEW
+    group_order=None,         
+    palette=None,            
+    log_scale=False,   
 ):
     if group_order is None:
         group_order = list(data[group_col].dropna().unique())
@@ -236,15 +240,22 @@ def plot_grid_hs_tp(
             if add_tp_reference_line:
                 ax.axhline(1.0 / tp, ls="--", c="crimson", lw=1.1, alpha=0.85)
 
+            if log_scale:
+                ax.set_yscale('log', base=10)
+                
+
             ax.tick_params(axis="x", rotation=45)
             ax.grid(alpha=0.25)
 
-    # remove per-axis labels
-    for ax in g.axes.flat:
+    for i, ax in enumerate(g.axes.flat):
         ax.set_xlabel("")
         ax.set_ylabel("")
         ax.xaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
-        ax.yaxis.set_major_locator(mticker.MaxNLocator(nbins=5))
+
+        if log_scale:
+            ax.set_yscale("log")
+            ax.tick_params(axis="y", which="minor", length=3)
+
 
     # one label for whole figure
     fig = g.figure
@@ -417,8 +428,8 @@ if __name__ == "__main__":
 
     # ---------- Build long frequency dataframe ----------
     freq_mapping = {
-        "Displacement": ("x_wel_ens_f_wf", "x_wel_ens_f_wf_std"),
-        "Velocity": ("v_wel_ens_f_wf", "v_wel_ens_f_wf_std"),
+        "Displacement": ("x_f_ens_mean", "x_f_ens_std"),
+        "Velocity": ("v_f_ens_mean", "v_f_ens_std"),
     }
     freq_df = build_long_metric_df(
         df=df,
@@ -430,9 +441,9 @@ if __name__ == "__main__":
 
     # ---------- Build long amplitude dataframe ----------
     amp_mapping = {
-        "From x-Welch ($2 \pi f \cdot A_x$)": ("Av_from_Ax_wf_wel_ens", "Av_from_Ax_wf_wel_ens_std"),
-        "From v-Welch": ("v_wel_ens_A_wf", "v_wel_ens_A_wf_std"),
-        "Worst-case (800-1000s)": ("v_wc_amp_mean", "v_wc_amp_std"),
+        "From x-Welch ($2 \pi f \cdot A_x$)": ("v_A_from_x_A_ens_mean", "v_A_from_x_A_ens_std"),
+        "From v-Welch": ("v_A_ens_mean", "v_A_ens_std"),
+        "Worst-case (800-1000s)": ("v_A_wc_ens_mean", "v_A_wc_ens_std"),
     }
     amp_df = build_long_metric_df(
         df=df,
@@ -483,7 +494,7 @@ if __name__ == "__main__":
         y_col=freq_y,
         ystd_col=freq_ystd,
         ylabel=freq_ylabel,
-        outfile=f"freq_grid_hs_tp_3x4_{suffix}.png",
+        outfile=os.path.join(outdir, f"freq_grid_hs_tp_3x4_{suffix}.png"),
         title=f"Frequency vs Wind Speed",
         markers=freq_markers,
         x_col="HWindSpeed",
@@ -500,7 +511,7 @@ if __name__ == "__main__":
         y_col=amp_y,
         ystd_col=amp_ystd,
         ylabel=amp_ylabel,
-        outfile=f"amp_grid_hs_tp_3x4_{suffix}.png",
+        outfile=os.path.join(outdir, f"amp_grid_hs_tp_3x4_{suffix}.png"),
         title=f"Surge Velocity Amplitude vs Wind Speed",
         markers=amp_markers,
         x_col="HWindSpeed",
@@ -513,9 +524,9 @@ if __name__ == "__main__":
     ct_df_filt = filter_by_tp_hs(ct_raw, TP_VALUES, HS_VALUES, atol=ATOL)
 
     ct_mapping = {
-        "$C_T$": ("CT_pooled_mean", "CT_pooled_std"),
-        "$C_T'$": ("CTp_pooled_mean", "CTp_pooled_std"),
-        "RtFldCt": ("RtFldCt_pooled_mean", "RtFldCt_pooled_std"),
+        "$C_T$": ("CT_ens_mean", "CT_ens_std"),
+        "$C_T'$": ("CTp_ens_mean", "CTp_ens_std"),
+        "RtFldCt": ("RtFldCt_ens_mean", "RtFldCt_ens_std"),
     }
 
     ct_long = build_long_metric_df(
@@ -536,9 +547,9 @@ if __name__ == "__main__":
         hs_values=HS_VALUES,
         group_col="Source",
         y_col="CTValue",
-        ystd_col="CTStd",
+        ystd_col=None,
         ylabel="Coefficient [-]",
-        outfile="ct_grid_hs_tp_3x4.png",
+        outfile=os.path.join(outdir, "ct_grid_hs_tp_3x4.png"),
         title="$C_T$ Metrics vs Wind Speed",
         markers=ct_markers,
         x_col="HWindSpeed",
@@ -547,6 +558,7 @@ if __name__ == "__main__":
         add_tp_reference_line=False,
         group_order=ct_order,
         palette=ct_palette,
+        log_scale=False,
     )
 
     plot_grid_hs_tp(
@@ -557,7 +569,7 @@ if __name__ == "__main__":
         y_col="CTStd",
         ystd_col=None,
         ylabel="Coefficient STD [-]",
-        outfile="ct_std_grid_hs_tp_3x4.png",
+        outfile=os.path.join(outdir, "ct_std_grid_hs_tp_3x4.png"),
         title="$C_T$ STD Metrics vs Wind Speed",
         markers=ct_markers,
         x_col="HWindSpeed",
@@ -566,4 +578,47 @@ if __name__ == "__main__":
         add_tp_reference_line=False,
         group_order=ct_order,
         palette=ct_palette,
+        log_scale=True,
+    )
+
+
+    ct_rtfld_ct_data = ct_long[ct_long["Source"].isin(["RtFldCt", "$C_T$"])].copy()
+    plot_grid_hs_tp(
+        data=ct_rtfld_ct_data,
+        tp_values=TP_VALUES,
+        hs_values=HS_VALUES,
+        group_col="Source",
+        y_col="CTValue",
+        ystd_col="CTStd",
+        ylabel="Coefficient [-]",
+        outfile=os.path.join(outdir, "ct_rtfld_ct_grid_hs_tp_3x4.png"),
+        title="$C_T$ and RtFldCt vs Wind Speed",
+        markers={"$C_T$": "o", "RtFldCt": "^"},
+        x_col="HWindSpeed",
+        x_offset=0.12,
+        atol=ATOL,
+        group_order=["RtFldCt", "$C_T$"],
+        palette={"$C_T$": "C0", "RtFldCt": "C2"},
+        log_scale=False,
+    )
+
+    # NEW: $C_T'$ separately (with error bars)
+    ct_ctp_data = ct_long[ct_long["Source"] == "$C_T'$"].copy()
+    plot_grid_hs_tp(
+        data=ct_ctp_data,
+        tp_values=TP_VALUES,
+        hs_values=HS_VALUES,
+        group_col="Source",
+        y_col="CTValue",
+        ystd_col="CTStd",
+        ylabel="Coefficient [-]",
+        outfile=os.path.join(outdir, "ct_ctp_grid_hs_tp_3x4.png"),
+        title="$C_T'$ vs Wind Speed",
+        markers={"$C_T'$": "s"},
+        x_col="HWindSpeed",
+        x_offset=0.08,
+        atol=ATOL,
+        group_order=["$C_T'$"],
+        palette={"$C_T'$": "C1"},
+        log_scale=False,
     )
